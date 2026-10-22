@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 from typing import Any
 
 import streamlit as st
@@ -133,6 +134,136 @@ st.markdown(
     "and record a separate reviewer verification status.</p>",
     unsafe_allow_html=True,
 )
+st.markdown("### Save and restore progress")
+
+
+uploaded_backup = st.file_uploader(
+    "Restore from a progress backup",
+    type=["json"],
+    key="progress_backup_uploader",
+)
+
+
+
+if uploaded_backup is not None:
+    if st.button("Restore saved progress", key="restore_progress_button"):
+        try:
+            restored = json.loads(
+                uploaded_backup.getvalue().decode("utf-8")
+            )
+
+            if not isinstance(restored, dict):
+                raise ValueError("The backup must contain a JSON object.")
+
+            project_name = restored.get("project_name", "")
+            deadline_text = restored.get("deadline", "")
+            requirements = restored.get("requirements")
+            next_id = restored.get("next_requirement_id", 0)
+
+            if not isinstance(project_name, str):
+                raise ValueError("Invalid project name.")
+
+            if not isinstance(deadline_text, str):
+                raise ValueError("Invalid deadline.")
+
+            restored_deadline = date.fromisoformat(deadline_text)
+
+            if not isinstance(requirements, list):
+                raise ValueError(
+                    "The backup requirements must be a list."
+                )
+
+            required_fields = {
+                "id", "name", "complete",
+                "verified", "evidence", "notes"
+            }
+
+            seen_ids = set()
+            clean_requirements = []
+
+            for item in requirements:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid requirement entry.")
+
+                if not required_fields.issubset(item):
+                    raise ValueError(
+                        "A requirement is missing required fields."
+                    )
+
+                requirement_id = item["id"]
+
+                if (
+                    not isinstance(requirement_id, int)
+                    or isinstance(requirement_id, bool)
+                    or requirement_id < 0
+                    or requirement_id in seen_ids
+                ):
+                    raise ValueError(
+                        "Requirement IDs must be unique non-negative integers."
+                    )
+
+                seen_ids.add(requirement_id)
+
+                for field in ("name", "evidence", "notes"):
+                    if not isinstance(item[field], str):
+                        raise ValueError(
+                            f"Invalid {field} in a requirement."
+                        )
+
+                for field in ("complete", "verified"):
+                    if not isinstance(item[field], bool):
+                        raise ValueError(
+                            f"Invalid {field} status."
+                        )
+
+                clean_requirements.append({
+                    "id": requirement_id,
+                    "name": item["name"],
+                    "complete": item["complete"],
+                    "verified": item["verified"],
+                    "evidence": item["evidence"],
+                    "notes": item["notes"],
+                })
+
+            if (
+                not isinstance(next_id, int)
+                or isinstance(next_id, bool)
+                or next_id < 0
+            ):
+                raise ValueError("Invalid requirement ID counter.")
+
+            next_id = max(
+                next_id,
+                max(seen_ids, default=-1) + 1
+            )
+
+            # Remove old requirement-widget values before restoring.
+            for key in list(st.session_state.keys()):
+                if key.startswith((
+                    "requirement_name_",
+                    "requirement_complete_",
+                    "requirement_verified_",
+                    "requirement_evidence_",
+                    "requirement_notes_",
+                )):
+                    del st.session_state[key]
+
+            # Restore all project data before creating project widgets.
+            st.session_state["project_name"] = project_name
+            st.session_state["deadline"] = restored_deadline
+            st.session_state["requirements"] = clean_requirements
+            st.session_state["next_requirement_id"] = next_id
+
+            st.success("Progress restored successfully!")
+            st.rerun()
+
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            TypeError,
+        ) as error:
+            st.error(f"Could not restore this backup: {error}")
 
 with st.container():
     project_col, deadline_col = st.columns([2, 1])
@@ -149,40 +280,11 @@ with st.container():
 
 requirements: list[dict[str, Any]] = st.session_state.requirements
 
-# Synchronize checkbox state before calculating the dashboard.
-for item in requirements:
-    requirement_id = item["id"]
-    item["complete"] = bool(
-        st.session_state.get(
-            f"requirement_complete_{requirement_id}",
-            item["complete"],
-        )
-    )
-    item["verified"] = bool(
-        st.session_state.get(
-            f"requirement_verified_{requirement_id}",
-            item["verified"],
-        )
-    )
-
-total_requirements = len(requirements)
-completed_count = sum(item["complete"] for item in requirements)
-verified_count = sum(item["verified"] for item in requirements)
-readiness = (
-    round(completed_count / total_requirements * 100)
-    if total_requirements
-    else 0
-)
-missing_requirements = [
-    item for item in requirements if not item["complete"]
-]
 
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
-metric_col1.metric("User-reported readiness", f"{readiness}%")
-metric_col2.metric("Marked complete", f"{completed_count} / {total_requirements}")
-metric_col3.metric("Independently verified", f"{verified_count} / {total_requirements}")
-st.progress(readiness, text=f"{readiness}% of requirements marked complete by your team")
+
+
+
 
 st.markdown("### Submission requirements")
 st.markdown(
@@ -259,6 +361,37 @@ if st.button("＋ Add requirement", type="secondary"):
     )
     st.rerun()
 
+
+total_requirements = len(requirements)
+completed_count = sum(item["complete"] for item in requirements)
+verified_count = sum(item["verified"] for item in requirements)
+
+readiness = (
+    round(completed_count / total_requirements * 100)
+    if total_requirements
+    else 0
+)
+
+missing_requirements = [
+    item for item in requirements if not item["complete"]
+]
+
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+metric_col1.metric("User-reported readiness", f"{readiness}%")
+metric_col2.metric(
+    "Marked complete",
+    f"{completed_count} / {total_requirements}",
+)
+metric_col3.metric(
+    "Independently verified",
+    f"{verified_count} / {total_requirements}",
+)
+
+st.progress(
+    readiness,
+    text=f"{readiness}% of requirements marked complete by your team",
+)
+
 st.markdown("### Readiness check")
 if not requirements:
     st.info("Add at least one requirement to calculate your submission readiness.")
@@ -291,7 +424,22 @@ if unverified_completed:
         f"{'s have' if len(unverified_completed) != 1 else ' has'} not been marked "
         "independently verified. A link alone does not count as verification."
     )
+# Create the backup after the requirement widgets have updated.
+backup_data = {
+    "backup_version": 1,
+    "project_name": st.session_state.project_name,
+    "deadline": st.session_state.deadline.isoformat(),
+    "requirements": requirements,
+    "next_requirement_id": st.session_state.next_requirement_id,
+}
 
+st.download_button(
+    "Download progress backup",
+    data=json.dumps(backup_data, indent=2, ensure_ascii=False),
+    file_name="shipready-progress.json",
+    mime="application/json",
+    help="Download a backup of your current project and checklist.",
+)
 report = build_report(
     st.session_state.project_name,
     st.session_state.deadline,
@@ -307,6 +455,7 @@ st.download_button(
     type="primary",
     use_container_width=True,
 )
+
 st.caption(
     "Your project details and checklist are kept in this Streamlit session. "
     "The report distinguishes self-reported completion from reviewer-marked verification."
